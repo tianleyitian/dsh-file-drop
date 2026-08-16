@@ -210,71 +210,87 @@ function toast(text: string): void {
 }
 
 /**
- * 注册命令贡献：出现在输入框左下角 +（命令）菜单的 command 分组里。
- * 注意：不能注册独立 inputTriggers 源——加号按钮只打开 'command' 分组
- * （inputTriggers.toggleSource('command')），独立源只进打字 '/' 菜单。
- * popupSelect 选项壳是官方机制，但 options() 是异步的——在选项壳打开的
- * 同时直接弹出系统文件对话框（host 侧 WinForms OpenFileDialog），选完
- * 文件路径立即写入输入框，选项壳只作结果确认（没有第二次选择）。
+ * host 命令 pick-file 的路径回写：菜单点击后 host 弹系统文件对话框（无选项壳，
+ * bare 命令 runDetached 直接执行），路径暂存 host 内存；本函数订阅当前会话的
+ * conversation 节点，发现 pick-file 命令成功完成（command 节点 + outcome.success）
+ * 后经 /file-drop/api/take 取回路径写入输入框。commandId 去重防重复写入。
  */
-function registerCommandContribution(ctx: ClientContext): void {
-  const commandUi = ctx.get('commandUi') as {
-    register(c: {
-      name: string
-      description: string
-      available(s: unknown): boolean
-      ui: {
-        kind: 'popupSelect'
-        options(s: { sessionId?: string }, signal: AbortSignal): Promise<readonly { id: string; label: string; detail?: string; active?: boolean }[]>
-        onSelect(option: { id: string; label: string }, s: { sessionId?: string }): void | Promise<void>
-      }
-    }): () => void
-  } | undefined
-  if (!commandUi) return
-  ctx.effect(() => commandUi.register({
-    name: '选择文件',
-    description: '打开系统文件选择框，把文件路径填入输入框',
-    available: () => true,
-    ui: {
-      kind: 'popupSelect',
-      options: async (session, signal) => {
-        const diag: Record<string, unknown> = { sid: session?.sessionId, stage: 'start' }
-        try {
-          const sid = session && session.sessionId
-          if (!sid) return []
-          const r = await api.pick()
-          diag.stage = 'picked'
-          diag.resp = r
-          if (signal.aborted) return []
-          const paths: string[] = r && Array.isArray(r.paths) ? r.paths : []
-          diag.paths = paths
-          if (!paths.length) {
-            if (r && r.error) toast(String(r.error))
-            return [{ id: 'close', label: '未选择文件', detail: '点击或按 Esc 关闭' }]
-          }
-          const input = inputFaceFor(sid)
-          diag.input = !!input
-          if (input) {
-            const draft = input.state ? input.state.getSnapshot().draft : ''
-            diag.draft = draft
-            const joined = paths.join('\n')
-            input.setDraft(draft ? draft.replace(/[ \t]+\n?$/, '') + '\n' + joined : joined)
-          }
-          diag.stage = 'setDraft done'
-          toast('已将 ' + paths.length + ' 个文件路径填入输入框')
-          return [{ id: 'close', label: '已将 ' + paths.length + ' 个文件路径填入输入框', detail: '点击或按 Esc 关闭' }]
-        } catch (err) {
-          diag.err = String((err as Error)?.message ?? err)
-          console.warn('[dsh-file-drop] pick failed:', err)
-          toast('选择文件失败: ' + String((err as Error)?.message ?? err))
-          return [{ id: 'close', label: '选择文件失败', detail: String((err as Error)?.message ?? err) }]
-        } finally {
-          ;(window as any).__dshFileDropDiag = diag
-        }
-      },
-      onSelect: () => { /* 结果确认，直接关闭 */ },
-    },
-  }), 'dsh-file-drop: command contribution')
+function registerPickFileSync(ctx: ClientContext): void {
+  const sessions = ctx.sessions as {
+    list: {
+      getSnapshot(): { current?: string }
+      subscribe(fn: () => void): () => void
+    }
+    scope(id: string): unknown
+    sessionOf(actx: unknown): {
+      subscribe(fn: () => void): () => void
+      getSnapshot(): { nodes?: Array<{
+        kind?: string
+        commandId?: string
+        name?: string | null
+        outcome?: { kind?: string } | null
+      }> }
+    } | undefined
+  }
+  const handled = new Set<string>()
+  let watched: ReturnType<typeof sessions.sessionOf> | undefined
+  let unsub: (() => void) | null = null
+
+  const consume = async (): Promise<void> => {
+    try {
+      const r = await api.take()
+      const paths: string[] = r && Array.isArray(r.pickPaths) ? r.pickPaths : []
+      if (!paths.length) return
+      const sid = resolveCurrent()
+      const input = sid ? inputFaceFor(sid) : null
+      if (!input) return
+      const draft = input.state ? input.state.getSnapshot().draft : ''
+      const joined = paths.join('\n')
+      input.setDraft(draft ? draft.replace(/[ \t]+\n?$/, '') + '\n' + joined : joined)
+      toast('已将 ' + paths.length + ' 个文件路径填入输入框')
+    } catch (err) {
+      console.warn('[dsh-file-drop] consume pick paths failed:', err)
+    }
+  }
+
+  const scan = (session: NonNullable<typeof watched>): void => {
+    const nodes = session.getSnapshot().nodes ?? []
+    for (const n of nodes) {
+      if (n.kind !== 'command' || n.name !== 'pick-file' || !n.outcome || n.outcome.kind !== 'success') continue
+      const id = n.commandId
+      if (!id || handled.has(id)) continue
+      handled.add(id)
+      void consume()
+    }
+  }
+
+  const sync = (): void => {
+    const sid = sessions.list.getSnapshot().current
+    let session: ReturnType<typeof sessions.sessionOf> | undefined
+    if (sid) {
+      const actx = sessions.scope(sid)
+      if (actx) session = sessions.sessionOf(actx)
+    }
+    if (session === watched) {
+      if (session) scan(session)
+      return
+    }
+    if (unsub) { try { unsub() } catch { /* ignore */ } unsub = null }
+    watched = session
+    if (session) {
+      unsub = session.subscribe(() => scan(session))
+      scan(session)
+    }
+  }
+
+  ctx.effect(() => {
+    const off = sessions.list.subscribe(() => sync())
+    sync()
+    return () => {
+      try { off() } catch { /* ignore */ }
+      if (unsub) { try { unsub() } catch { /* ignore */ } unsub = null }
+    }
+  }, 'dsh-file-drop: pick-file sync')
 }
 
 // ── 全窗口拖放层 ──────────────────────────────────────────────────────
@@ -592,7 +608,7 @@ export function apply(ctx: ClientContext): void {
   ;(window as any).__dshFileDropTimer = ctx.timer
 
   // 命令菜单"选择文件"（输入框左下角 + 的 command 分组）
-  registerCommandContribution(ctx)
+  registerPickFileSync(ctx)
 
   ctx.effect(() => ctx.slots.inject('shell.overlay', () =>
     ctx.slots.register({ name: 'shell.overlay', id: 'file-drop-zone' }, DropOverlay),

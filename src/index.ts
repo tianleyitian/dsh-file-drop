@@ -44,6 +44,13 @@ interface SessionLike { header?: { cwd?: string } }
 interface SessionsService { get(id: string): SessionLike | undefined }
 interface WebRoute { kind: 'prefix' | 'exact'; path: string; handler(req: IncomingMessage, res: ServerResponse): void | Promise<void> }
 interface WebServerService { register(route: WebRoute): () => void }
+interface CommandsService {
+  register(def: {
+    name: string
+    description: string
+    handler(inv: { rawInput: string; signal: AbortSignal }): unknown
+  }): () => void
+}
 
 type AppContext = Context & {
   fs: FsService
@@ -53,11 +60,12 @@ type AppContext = Context & {
   webServer: WebServerService
   sandboxPolicy?: { workspaceRoot?: string }
   timer: { timeout(cb: () => void, ms: number): () => void }
+  commands: CommandsService
   setInterval(fn: () => void, ms: number): any
 }
 
 export const name = 'dsh-file-drop'
-export const inject = ['fs', 'shell', 'sessions', 'subprocess', 'timer', 'webServer', 'sandboxPolicy']
+export const inject = ['fs', 'shell', 'sessions', 'subprocess', 'timer', 'webServer', 'sandboxPolicy', 'commands']
 
 // ── HTTP 工具 ────────────────────────────────────────────────────────
 function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -109,6 +117,8 @@ export function apply(ctx: AppContext): void {
   let pendingCancelled = false
   // 文件选择（命令菜单）：helper 弹出系统对话框后的路径回传
   let pendingPickResolve: ((paths: string[]) => void) | null = null
+  // host 命令 pick-file 选出的路径，client 经 take 取回写入输入框
+  let pendingPickPaths: string[] | null = null
   let helperActive = false
   let spawnPromise: Promise<unknown> | null = null
   let diagFile: string | null = null
@@ -427,6 +437,51 @@ Report('{"kind":"exited"}')
     await fsWrite(p, prev + text + '\n')
   }
 
+  // 打开系统原生文件选择框并等待结果（取消返回空数组）。供 API pick 与
+  // host 命令 pick-file 共用；同一时刻只允许一个选择进行中。
+  const openPicker = async (): Promise<string[]> => {
+    const state = (helper && !helper.dead) ? helper : null
+    if (!state) {
+      const cwd = resolveCwd()
+      if (cwd) {
+        void diag('pick: helper missing, background respawn')
+        spawnHelper(cwd).catch((e) => void diag('pick respawn failed: ' + String((e as Error)?.message ?? e)))
+      }
+      return []
+    }
+    if (pendingPickResolve) return []
+    const result = new Promise<string[]>((resolve) => { pendingPickResolve = resolve })
+    try {
+      await sendCmd(state, 'open-picker')
+    } catch (e) {
+      pendingPickResolve = null
+      void diag('pick sendCmd failed: ' + String((e as Error)?.message ?? e))
+      return []
+    }
+    // 用户长时间不选择/对话框异常时兜底（120s），避免请求悬挂
+    const timeout = new Promise<string[]>((resolve) => {
+      ctx.timer.timeout(() => {
+        if (pendingPickResolve) { pendingPickResolve = null; resolve([]) }
+      }, 120000)
+    })
+    return Promise.race([result, timeout])
+  }
+
+  // host 命令 pick-file：加号菜单点击即执行（无参数 bare 命令 → runDetached
+  // 直接执行，不经过 popupSelect 选项壳）。路径暂存 pendingPickPaths，
+  // client 经 take 取回写入输入框。
+  ctx.effect(() => ctx.commands.register({
+    name: 'pick-file',
+    description: '打开系统文件选择框，把文件路径填入输入框',
+    handler: async (): Promise<{ kind: 'success' | 'error'; text: string }> => {
+      const paths = await openPicker()
+      pendingPickPaths = paths.length ? paths : null
+      void diag('command pick-file: ' + (paths.length ? paths.length + ' paths' : 'cancelled'))
+      if (!paths.length) return { kind: 'success', text: '未选择文件' }
+      return { kind: 'success', text: '已选择 ' + paths.length + ' 个文件' }
+    },
+  }), 'dsh-file-drop: pick-file command')
+
   ctx.effect(() => () => {
     if (helper && helper.handle) {
       try { helper.handle.terminate() } catch { /* ignore */ }
@@ -465,15 +520,22 @@ Report('{"kind":"exited"}')
       }
     },
     take: async () => {
-      const out = { pending: pendingPaths, cancelled: pendingCancelled, armed: helperActive }
+      const out = {
+        pending: pendingPaths,
+        cancelled: pendingCancelled,
+        armed: helperActive,
+        pickPaths: pendingPickPaths,
+      }
       if (pendingPaths) void diag('take: ' + pendingPaths.length + ' paths consumed')
       pendingPaths = null
       pendingCancelled = false
+      pendingPickPaths = null
       return out
     },
     disarm: async () => {
       pendingPaths = null
       pendingCancelled = false
+      pendingPickPaths = null
       helperActive = false
       if (helper && !helper.dead) {
         try { await sendCmd(helper, 'hide'); void diag('disarm: hide sent') } catch { /* ignore */ }
@@ -481,31 +543,7 @@ Report('{"kind":"exited"}')
       return {}
     },
     pick: async () => {
-      // 命令菜单"选择文件"：helper 弹系统原生对话框，返回所选路径（取消返回空数组）
-      const state = (helper && !helper.dead) ? helper : null
-      if (!state) {
-        const cwd = resolveCwd()
-        if (cwd) {
-          void diag('pick: helper missing, background respawn')
-          spawnHelper(cwd).catch((e) => void diag('pick respawn failed: ' + String((e as Error)?.message ?? e)))
-        }
-        return { paths: [], error: '文件选择器未就绪，请稍后再试' }
-      }
-      if (pendingPickResolve) return { paths: [], error: '已有选择进行中' }
-      const result = new Promise<string[]>((resolve) => { pendingPickResolve = resolve })
-      try {
-        await sendCmd(state, 'open-picker')
-      } catch (e) {
-        pendingPickResolve = null
-        return { paths: [], error: String((e as Error)?.message ?? e) }
-      }
-      // 用户长时间不选择/对话框异常时兜底（120s），避免请求悬挂
-      const timeout = new Promise<string[]>((resolve) => {
-        ctx.timer.timeout(() => {
-          if (pendingPickResolve) { pendingPickResolve = null; resolve([]) }
-        }, 120000)
-      })
-      const paths = await Promise.race([result, timeout])
+      const paths = await openPicker()
       return { paths }
     },
     ingest: async (payload: { sessionId?: string; files?: Array<{ seq?: number; name?: string; relPath?: string; top?: string; data?: string }> }) => {
