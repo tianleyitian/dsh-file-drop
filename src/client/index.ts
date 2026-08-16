@@ -209,46 +209,13 @@ function toast(text: string): void {
   } catch { /* ignore */ }
 }
 
-/** 打开系统原生文件选择框（host 侧 WinForms OpenFileDialog），把路径写入输入框。 */
-async function pickAndPaste(sessionId: string): Promise<void> {
-  const diag: Record<string, unknown> = { sid: sessionId, stage: 'start' }
-  try {
-    const r = await api.pick()
-    diag.stage = 'picked'
-    diag.resp = r
-    const paths: string[] = r && Array.isArray(r.paths) ? r.paths : []
-    diag.paths = paths
-    if (!paths.length) {
-      if (r && r.error) toast(String(r.error))
-      return
-    }
-    const input = inputFaceFor(sessionId)
-    diag.input = !!input
-    if (!input) {
-      toast('输入框尚未就绪，请重试')
-      return
-    }
-    const draft = input.state ? input.state.getSnapshot().draft : ''
-    diag.draft = draft
-    const joined = paths.join('\n')
-    input.setDraft(draft ? draft.replace(/[ \t]+\n?$/, '') + '\n' + joined : joined)
-    diag.stage = 'setDraft done'
-    toast('已将 ' + paths.length + ' 个文件路径填入输入框')
-  } catch (err) {
-    diag.err = String((err as Error)?.message ?? err)
-    console.warn('[dsh-file-drop] pick failed:', err)
-    toast('选择文件失败: ' + String((err as Error)?.message ?? err))
-  } finally {
-    ;(window as any).__dshFileDropDiag = diag
-  }
-}
-
 /**
  * 注册命令贡献：出现在输入框左下角 +（命令）菜单的 command 分组里。
  * 注意：不能注册独立 inputTriggers 源——加号按钮只打开 'command' 分组
  * （inputTriggers.toggleSource('command')），独立源只进打字 '/' 菜单。
- * 官方机制：贡献命令 pick 后弹 popupSelect 选项壳，onSelect 里打开
- * 系统原生文件对话框（host 侧 WinForms OpenFileDialog）。
+ * popupSelect 选项壳是官方机制，但 options() 是异步的——在选项壳打开的
+ * 同时直接弹出系统文件对话框（host 侧 WinForms OpenFileDialog），选完
+ * 文件路径立即写入输入框，选项壳只作结果确认（没有第二次选择）。
  */
 function registerCommandContribution(ctx: ClientContext): void {
   const commandUi = ctx.get('commandUi') as {
@@ -258,7 +225,7 @@ function registerCommandContribution(ctx: ClientContext): void {
       available(s: unknown): boolean
       ui: {
         kind: 'popupSelect'
-        options(s: unknown, signal: AbortSignal): Promise<readonly { id: string; label: string; detail?: string; active?: boolean }[]>
+        options(s: { sessionId?: string }, signal: AbortSignal): Promise<readonly { id: string; label: string; detail?: string; active?: boolean }[]>
         onSelect(option: { id: string; label: string }, s: { sessionId?: string }): void | Promise<void>
       }
     }): () => void
@@ -270,16 +237,42 @@ function registerCommandContribution(ctx: ClientContext): void {
     available: () => true,
     ui: {
       kind: 'popupSelect',
-      options: async () => [{
-        id: 'pick',
-        label: '打开系统文件选择框…',
-        detail: '可多选，路径将逐行填入输入框',
-      }],
-      onSelect: (option, session) => {
-        if (option.id !== 'pick') return
-        const sid = session && session.sessionId
-        if (sid) void pickAndPaste(sid)
+      options: async (session, signal) => {
+        const diag: Record<string, unknown> = { sid: session?.sessionId, stage: 'start' }
+        try {
+          const sid = session && session.sessionId
+          if (!sid) return []
+          const r = await api.pick()
+          diag.stage = 'picked'
+          diag.resp = r
+          if (signal.aborted) return []
+          const paths: string[] = r && Array.isArray(r.paths) ? r.paths : []
+          diag.paths = paths
+          if (!paths.length) {
+            if (r && r.error) toast(String(r.error))
+            return [{ id: 'close', label: '未选择文件', detail: '点击或按 Esc 关闭' }]
+          }
+          const input = inputFaceFor(sid)
+          diag.input = !!input
+          if (input) {
+            const draft = input.state ? input.state.getSnapshot().draft : ''
+            diag.draft = draft
+            const joined = paths.join('\n')
+            input.setDraft(draft ? draft.replace(/[ \t]+\n?$/, '') + '\n' + joined : joined)
+          }
+          diag.stage = 'setDraft done'
+          toast('已将 ' + paths.length + ' 个文件路径填入输入框')
+          return [{ id: 'close', label: '已将 ' + paths.length + ' 个文件路径填入输入框', detail: '点击或按 Esc 关闭' }]
+        } catch (err) {
+          diag.err = String((err as Error)?.message ?? err)
+          console.warn('[dsh-file-drop] pick failed:', err)
+          toast('选择文件失败: ' + String((err as Error)?.message ?? err))
+          return [{ id: 'close', label: '选择文件失败', detail: String((err as Error)?.message ?? err) }]
+        } finally {
+          ;(window as any).__dshFileDropDiag = diag
+        }
       },
+      onSelect: () => { /* 结果确认，直接关闭 */ },
     },
   }), 'dsh-file-drop: command contribution')
 }
