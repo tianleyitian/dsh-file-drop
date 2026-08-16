@@ -219,7 +219,7 @@ function registerFileSource(ctx: ClientContext): void {
   if (!inputTriggers) return
   ctx.effect(() => inputTriggers.registerSource({
     trigger: '/',
-    name: 'file',
+    name: '文件',
     order: 999,
     candidates: async () => [{
       name: '选择文件',
@@ -231,14 +231,11 @@ function registerFileSource(ctx: ClientContext): void {
       return 'handled'
     },
   }), 'dsh-file-drop: command source')
-  // 分组标题本地化（未注册时显示原始名 file）
-  const locale = ctx.get('locale') as { register(ns: string, dict: { zh: Record<string, string>; en: Record<string, string> }): unknown } | undefined
-  if (locale) {
-    ctx.effect(() => locale.register('slash.menu', {
-      zh: { 'file': '文件' },
-      en: { 'file': 'Files' },
-    }) as () => void, 'dsh-file-drop: locale')
-  }
+  // 分组标题直接使用本地化后的 name（'文件'）。
+  // 注意：不能 locale.register('slash.menu', ...) 来翻译分组名——
+  // 该 namespace 已被本体（dsh-client-ui-commands）注册过 zh/en，
+  // 而 dsh-client-locale 的 register 不允许重复注册同一 locale（会抛错），
+  // 也没有合并/扩展 API，所以分组名只能直接写成展示文案。
 }
 
 // ── 全窗口拖放层 ──────────────────────────────────────────────────────
