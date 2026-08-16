@@ -208,34 +208,44 @@ async function pickAndPaste(sessionId: string): Promise<void> {
 }
 
 /**
- * 注册 '/' 触发词源：出现在输入框左下角命令菜单里（MenuView 按 source 分组渲染）。
- * 服务可选（未装 ui-input-trigger 时拖放功能不受影响）；onPick 返回 'handled'
- * 后异步打开文件对话框——官方为"source 自行处理（如打开自己的弹窗）"设计的路径。
+ * 注册命令贡献：出现在输入框左下角 +（命令）菜单的 command 分组里。
+ * 注意：不能注册独立 inputTriggers 源——加号按钮只打开 'command' 分组
+ * （inputTriggers.toggleSource('command')），独立源只进打字 '/' 菜单。
+ * 官方机制：贡献命令 pick 后弹 popupSelect 选项壳，onSelect 里打开
+ * 系统原生文件对话框（host 侧 WinForms OpenFileDialog）。
  */
-function registerFileSource(ctx: ClientContext): void {
-  const inputTriggers = ctx.get('inputTriggers') as {
-    registerSource(src: Record<string, unknown>): () => void
+function registerCommandContribution(ctx: ClientContext): void {
+  const commandUi = ctx.get('commandUi') as {
+    register(c: {
+      name: string
+      description: string
+      available(s: unknown): boolean
+      ui: {
+        kind: 'popupSelect'
+        options(s: unknown, signal: AbortSignal): Promise<readonly { id: string; label: string; detail?: string; active?: boolean }[]>
+        onSelect(option: { id: string; label: string }, s: { sessionId?: string }): void | Promise<void>
+      }
+    }): () => void
   } | undefined
-  if (!inputTriggers) return
-  ctx.effect(() => inputTriggers.registerSource({
-    trigger: '/',
-    name: '文件',
-    order: 999,
-    candidates: async () => [{
-      name: '选择文件',
-      description: '打开系统文件选择框，把文件路径填入输入框',
-    }],
-    onPick: (pick: { session?: { sessionId?: string } } | undefined) => {
-      const sid = pick && pick.session ? pick.session.sessionId : undefined
-      if (sid) void pickAndPaste(sid)
-      return 'handled'
+  if (!commandUi) return
+  ctx.effect(() => commandUi.register({
+    name: '选择文件',
+    description: '打开系统文件选择框，把文件路径填入输入框',
+    available: () => true,
+    ui: {
+      kind: 'popupSelect',
+      options: async () => [{
+        id: 'pick',
+        label: '打开系统文件选择框…',
+        detail: '可多选，路径将逐行填入输入框',
+      }],
+      onSelect: (option, session) => {
+        if (option.id !== 'pick') return
+        const sid = session && session.sessionId
+        if (sid) void pickAndPaste(sid)
+      },
     },
-  }), 'dsh-file-drop: command source')
-  // 分组标题直接使用本地化后的 name（'文件'）。
-  // 注意：不能 locale.register('slash.menu', ...) 来翻译分组名——
-  // 该 namespace 已被本体（dsh-client-ui-commands）注册过 zh/en，
-  // 而 dsh-client-locale 的 register 不允许重复注册同一 locale（会抛错），
-  // 也没有合并/扩展 API，所以分组名只能直接写成展示文案。
+  }), 'dsh-file-drop: command contribution')
 }
 
 // ── 全窗口拖放层 ──────────────────────────────────────────────────────
@@ -552,8 +562,8 @@ export function apply(ctx: ClientContext): void {
   clientCtx = ctx
   ;(window as any).__dshFileDropTimer = ctx.timer
 
-  // 命令菜单"选择文件"（输入框左下角 +）
-  registerFileSource(ctx)
+  // 命令菜单"选择文件"（输入框左下角 + 的 command 分组）
+  registerCommandContribution(ctx)
 
   ctx.effect(() => ctx.slots.inject('shell.overlay', () =>
     ctx.slots.register({ name: 'shell.overlay', id: 'file-drop-zone' }, DropOverlay),
