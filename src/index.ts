@@ -280,21 +280,36 @@ $timer.Add_Tick({
           $form.Hide()
           Report('{"kind":"hidden"}')
         } elseif ($line -eq 'open-picker') {
-          # 系统原生文件选择框（模态，跑在 UI 线程）；取消时上报空结果
-          try {
-            $dlg = New-Object System.Windows.Forms.OpenFileDialog
-            $dlg.Multiselect = $true
-            $dlg.Title = '选择文件（路径将填入输入框）'
-            $dlg.Filter = '所有文件 (*.*)|*.*'
-            $dlg.RestoreDirectory = $true
-            if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-              Report((@{ kind = 'picked'; paths = @($dlg.FileNames) } | ConvertTo-Json -Compress -Depth 6))
-            } else {
+          # 系统原生文件选择框（模态，跑在 UI 线程）；取消时上报空结果。
+          # 对话框打开期间 Timer 仍会 tick（嵌套消息循环）——用 pickOpen 标志
+          # 挡住重复/嵌套的 open-picker，避免连点出多个对话框互相打架。
+          if ($script:pickOpen) {
+            LogH('PICK-BUSY: 已有对话框打开，忽略重复命令')
+          } else {
+            $script:pickOpen = $true
+            try {
+              LogH('PICK: 打开对话框')
+              $dlg = New-Object System.Windows.Forms.OpenFileDialog
+              $dlg.Multiselect = $true
+              $dlg.Title = '选择文件（路径将填入输入框）'
+              $dlg.Filter = '所有文件 (*.*)|*.*'
+              $dlg.RestoreDirectory = $true
+              $result = $dlg.ShowDialog()
+              LogH('PICK: ShowDialog 结果=' + $result)
+              if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+                $names = @($dlg.FileNames)
+                LogH('PICK: 选中 ' + $names.Count + ' 个文件')
+                Report((@{ kind = 'picked'; paths = $names } | ConvertTo-Json -Compress -Depth 6))
+              } else {
+                LogH('PICK: 用户取消')
+                Report('{"kind":"pick-cancelled"}')
+              }
+            } catch {
+              LogH('PICK-ERR: ' + $_.Exception.Message)
               Report('{"kind":"pick-cancelled"}')
+            } finally {
+              $script:pickOpen = $false
             }
-          } catch {
-            LogH('PICK-ERR: ' + $_.Exception.Message)
-            Report('{"kind":"pick-cancelled"}')
           }
         } elseif ($line -eq 'quit') {
           [System.Windows.Forms.Application]::Exit()

@@ -191,6 +191,24 @@ function DropBridge(props: BridgeProps): null {
 }
 
 // ── 命令菜单"选择文件"源（输入框左下角 + / 命令菜单） ─────────────────
+/** 页面顶部小提示（成功/失败都可见，避免"点了没反应"）。 */
+function toast(text: string): void {
+  try {
+    let el = document.getElementById('dsh-file-drop-toast') as HTMLDivElement | null
+    if (!el) {
+      el = document.createElement('div')
+      el.id = 'dsh-file-drop-toast'
+      el.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2147483002;' +
+        'padding:8px 16px;border-radius:999px;background:rgba(30,30,40,.92);color:#fff;font-size:13px;' +
+        'box-shadow:0 4px 16px rgba(0,0,0,.3);max-width:70vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+      document.body.appendChild(el)
+    }
+    el.textContent = text
+    el.style.display = 'block'
+    window.setTimeout(() => { el.style.display = 'none' }, 5000)
+  } catch { /* ignore */ }
+}
+
 /** 打开系统原生文件选择框（host 侧 WinForms OpenFileDialog），把路径写入输入框。 */
 async function pickAndPaste(sessionId: string): Promise<void> {
   const diag: Record<string, unknown> = { sid: sessionId, stage: 'start' }
@@ -200,18 +218,26 @@ async function pickAndPaste(sessionId: string): Promise<void> {
     diag.resp = r
     const paths: string[] = r && Array.isArray(r.paths) ? r.paths : []
     diag.paths = paths
-    if (!paths.length) return
+    if (!paths.length) {
+      if (r && r.error) toast(String(r.error))
+      return
+    }
     const input = inputFaceFor(sessionId)
     diag.input = !!input
-    if (!input) return
+    if (!input) {
+      toast('输入框尚未就绪，请重试')
+      return
+    }
     const draft = input.state ? input.state.getSnapshot().draft : ''
     diag.draft = draft
     const joined = paths.join('\n')
     input.setDraft(draft ? draft.replace(/[ \t]+\n?$/, '') + '\n' + joined : joined)
     diag.stage = 'setDraft done'
+    toast('已将 ' + paths.length + ' 个文件路径填入输入框')
   } catch (err) {
     diag.err = String((err as Error)?.message ?? err)
     console.warn('[dsh-file-drop] pick failed:', err)
+    toast('选择文件失败: ' + String((err as Error)?.message ?? err))
   } finally {
     ;(window as any).__dshFileDropDiag = diag
   }
