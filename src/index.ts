@@ -294,7 +294,18 @@ $timer.Add_Tick({
               $dlg.Title = '选择文件（路径将填入输入框）'
               $dlg.Filter = '所有文件 (*.*)|*.*'
               $dlg.RestoreDirectory = $true
-              $result = $dlg.ShowDialog()
+              # 关键：ShowDialog 无 owner 时对话框可能弹出在屏幕外/被遮挡（用户看不到，
+              # ShowDialog 永久阻塞）。先显示透明窗（跟随鼠标、topmost）作为 owner，
+              # 对话框会出现在鼠标附近且层级在最前。
+              try {
+                $p = [System.Windows.Forms.Cursor]::Position
+                $form.Location = New-Object System.Drawing.Point(($p.X - 100), ($p.Y - 100))
+                $form.Show()
+                if (-not $form.IsHandleCreated) { [void]$form.CreateControl() }
+                [DshDropWin32]::ShowWindow($form.Handle, 8) | Out-Null
+                [DshDropWin32]::SetWindowPos($form.Handle, [IntPtr]::new(-1), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0010) | Out-Null
+              } catch { LogH('PICK-OWNER-ERR: ' + $_.Exception.Message) }
+              $result = $dlg.ShowDialog($form)
               LogH('PICK: ShowDialog 结果=' + $result)
               if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
                 $names = @($dlg.FileNames)
@@ -309,6 +320,7 @@ $timer.Add_Tick({
               Report('{"kind":"pick-cancelled"}')
             } finally {
               $script:pickOpen = $false
+              try { $form.Hide() } catch {}
             }
           }
         } elseif ($line -eq 'quit') {
