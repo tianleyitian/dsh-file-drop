@@ -255,20 +255,27 @@ $form.Add_Click({
   } catch {}
   try { $form.Hide() } catch {}
 })
+$script:pickOpen = $false
+$script:pickDlg = $null
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 50
 $timer.Add_Tick({
-  try {
-    if ($form.Visible) {
-      $p = [System.Windows.Forms.Cursor]::Position
-      $form.Location = New-Object System.Drawing.Point(($p.X - 100), ($p.Y - 100))
-      if (((Get-Date) - $lastActivity).TotalSeconds -gt 8) {
-        LogH('auto-hide (idle 8s)')
-        Report('{"kind":"cancelled"}')
-        $form.Hide()
+  # 对话框打开期间（pickOpen）：不跟随鼠标、不自动隐藏——8s 无活动隐藏会
+  # 连带隐藏模态对话框（owner 被 Hide → 对话框"莫名其妙消失"，ShowDialog
+  # 却仍在阻塞，输入焦点被占）。对话框期间只响应 close-picker 命令。
+  if (-not $script:pickOpen) {
+    try {
+      if ($form.Visible) {
+        $p = [System.Windows.Forms.Cursor]::Position
+        $form.Location = New-Object System.Drawing.Point(($p.X - 100), ($p.Y - 100))
+        if (((Get-Date) - $lastActivity).TotalSeconds -gt 8) {
+          LogH('auto-hide (idle 8s)')
+          Report('{"kind":"cancelled"}')
+          $form.Hide()
+        }
       }
-    }
-  } catch { LogH('FOLLOW-ERR: ' + $_.Exception.Message) }
+    } catch { LogH('FOLLOW-ERR: ' + $_.Exception.Message) }
+  }
   try {
     $cmdFile = Join-Path $cmdDir 'cmd'
     if (Test-Path $cmdFile) {
@@ -289,6 +296,13 @@ $timer.Add_Tick({
         } elseif ($line -eq 'hide') {
           $form.Hide()
           Report('{"kind":"hidden"}')
+        } elseif ($line -eq 'close-picker') {
+          # 请求超时/中止时由宿主下发：在嵌套 tick 里关闭模态对话框，
+          # ShowDialog 随即返回（Cancel），对话框不再悬挂。
+          LogH('CLOSE-PICKER: 关闭对话框')
+          if ($script:pickDlg) {
+            try { $script:pickDlg.Close() } catch { LogH('CLOSE-PICKER-ERR: ' + $_.Exception.Message) }
+          }
         } elseif ($line -eq 'open-picker') {
           # 系统原生文件选择框（模态，跑在 UI 线程）；取消时上报空结果。
           # 对话框打开期间 Timer 仍会 tick（嵌套消息循环）——用 pickOpen 标志
@@ -315,6 +329,7 @@ $timer.Add_Tick({
                 [DshDropWin32]::ShowWindow($form.Handle, 8) | Out-Null
                 [DshDropWin32]::SetWindowPos($form.Handle, [IntPtr]::new(-1), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0010) | Out-Null
               } catch { LogH('PICK-OWNER-ERR: ' + $_.Exception.Message) }
+              $script:pickDlg = $dlg
               $result = $dlg.ShowDialog($form)
               LogH('PICK: ShowDialog 结果=' + $result)
               if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
@@ -330,6 +345,7 @@ $timer.Add_Tick({
               Report('{"kind":"pick-cancelled"}')
             } finally {
               $script:pickOpen = $false
+              $script:pickDlg = $null
               try { $form.Hide() } catch {}
             }
           }
@@ -439,7 +455,9 @@ Report('{"kind":"exited"}')
 
   // 打开系统原生文件选择框并等待结果（取消返回空数组）。供 API pick 与
   // host 命令 pick-file 共用；同一时刻只允许一个选择进行中。
-  const openPicker = async (): Promise<string[]> => {
+  // signal：命令执行中止（会话关闭/UI 取消）时主动 close-picker 关闭对话框，
+  // 避免对话框与请求生命周期脱节（对话框悬挂 → helper 卡死 → 无法再 pick）。
+  const openPicker = async (signal?: AbortSignal): Promise<string[]> => {
     const state = (helper && !helper.dead) ? helper : null
     if (!state) {
       const cwd = resolveCwd()
@@ -451,6 +469,15 @@ Report('{"kind":"exited"}')
     }
     if (pendingPickResolve) return []
     const result = new Promise<string[]>((resolve) => { pendingPickResolve = resolve })
+    // 请求中止：让 helper 在嵌套 tick 里关闭模态对话框（ShowDialog 随即返回并
+    // 上报 pick-cancelled），pendingPickResolve 被消费，不残留悬挂状态。
+    const onAbort = (): void => {
+      try { void sendCmd(state, 'close-picker') } catch { /* ignore */ }
+    }
+    if (signal) {
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    }
     try {
       await sendCmd(state, 'open-picker')
     } catch (e) {
@@ -458,11 +485,16 @@ Report('{"kind":"exited"}')
       void diag('pick sendCmd failed: ' + String((e as Error)?.message ?? e))
       return []
     }
-    // 用户长时间不选择/对话框异常时兜底（120s），避免请求悬挂
+    // 用户长时间不选择/对话框异常时兜底（5min，选文件足够宽裕）：
+    // 超时后同样 close-picker 关闭对话框，避免对话框悬挂。
     const timeout = new Promise<string[]>((resolve) => {
       ctx.timer.timeout(() => {
-        if (pendingPickResolve) { pendingPickResolve = null; resolve([]) }
-      }, 120000)
+        if (pendingPickResolve) {
+          pendingPickResolve = null
+          try { void sendCmd(state, 'close-picker') } catch { /* ignore */ }
+          resolve([])
+        }
+      }, 300000)
     })
     return Promise.race([result, timeout])
   }
@@ -473,8 +505,8 @@ Report('{"kind":"exited"}')
   ctx.effect(() => ctx.commands.register({
     name: 'pick-file',
     description: '打开系统文件选择框，把文件路径填入输入框',
-    handler: async (): Promise<{ kind: 'success' | 'error'; text: string }> => {
-      const paths = await openPicker()
+    handler: async (inv): Promise<{ kind: 'success' | 'error'; text: string }> => {
+      const paths = await openPicker(inv.signal)
       pendingPickPaths = paths.length ? paths : null
       void diag('command pick-file: ' + (paths.length ? paths.length + ' paths' : 'cancelled'))
       if (!paths.length) return { kind: 'success', text: '未选择文件' }
