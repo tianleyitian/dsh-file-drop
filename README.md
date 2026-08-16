@@ -13,22 +13,37 @@
 
 ## 安装
 
-> `dsh plugin` 是官方插件管理命令（内部转发 pnpm，自动将声明 `dsh.bundle` 的依赖并入 profile bundles），需先安装 pnpm：`npm install -g pnpm`
+### 从 npm 安装（推荐）
 
-### 方式一：npm 发布后
-
-```bash
-dsh plugin --profile <name> add dsh-file-drop
-```
-
-### 方式二：本地目录 / GitHub Release tgz（无需 npm 发布）
+插件已发布到 npm，一条命令装齐（需先安装 pnpm：`npm install -g pnpm`）：
 
 ```bash
-dsh plugin --profile <name> add D:\path\to\dsh-file-drop      # 本地目录
-dsh plugin --profile <name> add github:<user>/dsh-file-drop   # git 依赖（pnpm 需在 pnpm-workspace.yaml 的 allowBuilds 放行 prepare 脚本）
+dsh plugin --profile web add dsh-file-drop
 ```
 
-### 方式三：dsh-super-injector（本机开发/热装）
+装完重启 dsh web 即可使用。`--profile` 换成你的 profile 名（默认 `web`）。
+
+### 从 GitHub 仓库安装（开发调试）
+
+插件已在 npm 发布，仓库安装仅供开发调试（需要 Node.js 与 pnpm）：
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/tianleyitian/dsh-file-drop.git
+cd dsh-file-drop
+
+# 2. 安装依赖并构建
+npm install
+bash scripts/build.sh
+
+# 3. 把包链接进 web profile
+dsh plugin --profile web add link:$(pwd)
+
+# 4. 重启 dsh web
+dsh web
+```
+
+### dsh-super-injector（本机开发/热装）
 
 ```bash
 dev_build_plugin {"dir": "D:/.../dsh-file-drop"}
