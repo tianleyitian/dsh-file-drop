@@ -1,7 +1,7 @@
 /**
- * @dsh-external/dsh-dropin — client half（持久版拖放拦截的浏览器侧）。
+ * dsh-file-drop — client half（持久版拖放拦截的浏览器侧）。
  * 移植自 dynamic 插件 drop-1 的客户端：全窗口拖放监听 + 拦截窗状态轮询 +
- * inputActions 桥（把真实路径写入输入框）。host 通信走 /dropin/api HTTP。
+ * inputActions 桥（把真实路径写入输入框）。host 通信走 /file-drop/api HTTP。
  */
 import React from 'react'
 import type { Context } from 'cordis'
@@ -22,9 +22,9 @@ type ClientContext = Context & {
 
 export const inject = ['slots', 'timer']
 
-// ── host API（POST /dropin/api/{method}，响应 { ok, value }） ──────────
+// ── host API（POST /file-drop/api/{method}，响应 { ok, value }） ──────────
 async function apiCall(method: string, payload?: unknown): Promise<any> {
-  const res = await fetch('/dropin/api/' + method, {
+  const res = await fetch('/file-drop/api/' + method, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload ?? {}),
@@ -165,7 +165,7 @@ function DropOverlay(props: OverlayProps): React.ReactElement {
   // 标准 props 缺失时回退到桥接会话（diagnostic 保留给排障）
   const hookCurrent = props.useSessions ? props.useSessions((s) => s.current) : undefined
   const current = hookCurrent || lastBridgeSession
-  const timer = (window as any).__dshDropinTimer as ClientContext['timer'] | undefined
+  const timer = (window as any).__dshFileDropTimer as ClientContext['timer'] | undefined
 
   const flash = (text: string): void => {
     setNotice(text)
@@ -458,13 +458,13 @@ function DropOverlay(props: OverlayProps): React.ReactElement {
 
 export function apply(ctx: ClientContext): void {
   // 把 timer 暴露给组件（组件内无法直接取 inject 服务）
-  ;(window as any).__dshDropinTimer = ctx.timer
+  ;(window as any).__dshFileDropTimer = ctx.timer
 
   ctx.effect(() => ctx.slots.inject('shell.overlay', () =>
-    ctx.slots.register({ name: 'shell.overlay', id: 'dropin-zone' }, DropOverlay),
-  ), 'dsh-dropin: overlay')
+    ctx.slots.register({ name: 'shell.overlay', id: 'file-drop-zone' }, DropOverlay),
+  ), 'dsh-file-drop: overlay')
 
   ctx.effect(() => ctx.slots.inject('conversation.input.dock', () =>
-    ctx.slots.register({ name: 'conversation.input.dock', id: 'dropin-bridge' }, DropBridge),
-  ), 'dsh-dropin: bridge')
+    ctx.slots.register({ name: 'conversation.input.dock', id: 'file-drop-bridge' }, DropBridge),
+  ), 'dsh-file-drop: bridge')
 }

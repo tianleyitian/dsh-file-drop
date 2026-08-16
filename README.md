@@ -1,4 +1,4 @@
-# dsh-dropin — 拖放文件到 DSH 输入框
+﻿# dsh-file-drop — 拖放文件到 DSH 输入框
 
 把文件/文件夹拖到 DSH 窗口任意位置，**真实磁盘路径瞬间写入对话输入框**——零内容传输，与文件大小无关。
 
@@ -9,22 +9,22 @@
 - 📁 文件夹直接给文件夹路径；多文件逐行粘贴；已有草稿自动追加
 - 🖼️ 纯图片拖拽保留应用原生的"拖图片到此添加"
 - 🛡️ 全链路自愈：点击关闭、8 秒无活动自动隐藏、追加式命令防竞态、DLL 缓存冷启 ~1s、看门狗 20s 自动重启、PowerShell 异常全捕获
-- 🔁 失败自动回退内容上传（文本 fs 直写 / 二进制 Node 批量写盘到 `.dsh-dropin/`）
+- 🔁 失败自动回退内容上传（文本 fs 直写 / 二进制 Node 批量写盘到 `.dsh-file-drop/`）
 
 ## 安装
 
 ### 方式一：dsh-super-injector（本机开发/热装）
 
 ```bash
-dev_build_plugin {"dir": "D:/.../dsh-dropin"}
-dev_install_package {"dir": "D:/.../dsh-dropin"}   # 写入 profile，重启后自动装配
-# 或仅运行时注入：dev_inject_plugin {"dir": "D:/.../dsh-dropin"}
+dev_build_plugin {"dir": "D:/.../dsh-file-drop"}
+dev_install_package {"dir": "D:/.../dsh-file-drop"}   # 写入 profile，重启后自动装配
+# 或仅运行时注入：dev_inject_plugin {"dir": "D:/.../dsh-file-drop"}
 ```
 
 ### 方式二：官方插件命令（npm 发布后）
 
 ```bash
-dsh plugin --profile <name> add dsh-dropin
+dsh plugin --profile <name> add dsh-file-drop
 ```
 
 ### 方式三：手动（从 GitHub Release 下载 tgz）
@@ -54,9 +54,9 @@ dsh plugin --profile <name> add <解压目录>
         → stdout 上报宿主 → 客户端轮询取回 → 写入输入框
 ```
 
-- 宿主通信：`POST /dropin/api/{arm|take|disarm|ingest}`（webServer 路由 + 同源围栏）
+- 宿主通信：`POST /file-drop/api/{arm|take|disarm|ingest}`（webServer 路由 + 同源围栏）
 - helper：常驻 PowerShell WinForms 进程（隐藏、置顶、不抢焦点），命令通道为追加式文件
-- 失败兜底：内容上传写入 `<工作区>/.dsh-dropin/`
+- 失败兜底：内容上传写入 `<工作区>/.dsh-file-drop/`
 
 ## 构建
 
@@ -68,14 +68,15 @@ bash scripts/build.sh        # tsc（host）+ tsdown（client bundle）
 ## 卸载
 
 ```bash
-dev_uninject_plugin dsh-dropin    # 卸载并清理 profile 条目
+dev_uninject_plugin dsh-file-drop    # 卸载并清理 profile 条目
 ```
 
 ## 诊断
 
-- 宿主日志：`<harness 根>/.dsh-dropin/.helper/diag.log`
-- helper 日志：`<harness 根>/.dsh-dropin/.helper/helper.log`
+- 宿主日志：`<harness 根>/.dsh-file-drop/.helper/diag.log`
+- helper 日志：`<harness 根>/.dsh-file-drop/.helper/helper.log`
 
 ## 许可证
 
 BSD-3-Clause
+

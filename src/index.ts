@@ -1,11 +1,11 @@
 /**
- * @dsh-external/dsh-dropin — host half（持久版拖放拦截）。
+ * dsh-file-drop — host half（持久版拖放拦截）。
  * 原 dynamic 插件 drop-1 的宿主逻辑完整移植：
  *   - 常驻 PowerShell WinForms 透明小窗（跟随鼠标），OLE 拖放截获真实路径
  *   - 命令通道：cmdDir/cmd 追加式文件 + UI 线程 Timer 轮询（杜绝竞态丢命令）
  *   - helper 自愈：点击关闭 / 8s 无活动自动隐藏 / ThreadException 捕获 / DLL 缓存重启
  *   - 看门狗 20s 检测 + arm 时后台拉起；失败回退内容上传（fs 直写 / node 批量）
- *   - 客户端通信：POST /dropin/api/{arm|take|disarm|ingest}（webServer 路由）
+ *   - 客户端通信：POST /file-drop/api/{arm|take|disarm|ingest}（webServer 路由）
  */
 import type { Context } from 'cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -55,7 +55,7 @@ type AppContext = Context & {
   setInterval(fn: () => void, ms: number): any
 }
 
-export const name = '@dsh-external/dsh-dropin'
+export const name = 'dsh-file-drop'
 export const inject = ['fs', 'shell', 'sessions', 'subprocess', 'timer', 'webServer', 'sandboxPolicy']
 
 // ── HTTP 工具 ────────────────────────────────────────────────────────
@@ -141,7 +141,7 @@ export function apply(ctx: AppContext): void {
       if (!diagFile) {
         const cwd = resolveCwd()
         if (!cwd) return
-        diagFile = String(cwd).replace(/[\\/]+$/, '') + '/.dsh-dropin/.helper/diag.log'
+        diagFile = String(cwd).replace(/[\\/]+$/, '') + '/.dsh-file-drop/.helper/diag.log'
       }
       let prev = ''
       try { prev = await ctx.fs.readText(await ctx.fs.resolve(diagFile)) } catch { /* 首写 */ }
@@ -157,7 +157,7 @@ export function apply(ctx: AppContext): void {
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch {}
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$cmdDir = Join-Path (Get-Location) '.dsh-dropin/.helper'
+$cmdDir = Join-Path (Get-Location) '.dsh-file-drop/.helper'
 [System.IO.Directory]::CreateDirectory($cmdDir) | Out-Null
 $dll = Join-Path $cmdDir 'DshDropWin32.dll'
 if (Test-Path $dll) {
@@ -299,7 +299,7 @@ Report('{"kind":"exited"}')
         stdio: { stdin: 'ignore', stdout: 'pipe', stderr: { maxBytes: 8192 } },
         graceMs: 5000,
       })
-      const cmdDir = String(cwd).replace(/[\\/]+$/, '') + '/.dsh-dropin/.helper'
+      const cmdDir = String(cwd).replace(/[\\/]+$/, '') + '/.dsh-file-drop/.helper'
       const state = { handle, buf: '', dead: false, cmdDir }
       helper = state
       handle.stdout.on('data', (chunk: Buffer) => {
@@ -373,7 +373,7 @@ Report('{"kind":"exited"}')
     }
   }, 20000)
 
-  // ── HTTP API（POST /dropin/api/{arm|take|disarm|ingest}） ──────────
+  // ── HTTP API（POST /file-drop/api/{arm|take|disarm|ingest}） ──────────
   const api: Record<string, (payload: any) => Promise<unknown>> = {
     arm: async (payload: { sessionId?: string }) => {
       pendingPaths = null
@@ -417,7 +417,7 @@ Report('{"kind":"exited"}')
       if (!files.length) throw new Error('缺少文件数据')
       const cwd = resolveCwd(payload?.sessionId)
       if (!cwd) throw new Error('无法确定工作目录，请先打开一个会话')
-      const dropDir = String(cwd).replace(/[\\/]+$/, '') + '/.dsh-dropin'
+      const dropDir = String(cwd).replace(/[\\/]+$/, '') + '/.dsh-file-drop'
       const written: Array<{ seq: number | undefined; path: string; rootPath: string }> = []
       const skipped: Array<{ seq: number | undefined; relPath: string; reason: string }> = []
       const nodeBatch: Array<{ seq: number | undefined; dir: string; path: string; rootPath: string; b64: string }> = []
@@ -533,7 +533,7 @@ Report('{"kind":"exited"}')
 
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
-    path: '/dropin/api',
+    path: '/file-drop/api',
     handler: async (req, res) => {
       if (!fence(req)) {
         writeJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
@@ -544,7 +544,7 @@ Report('{"kind":"exited"}')
         return
       }
       const pathname = new URL(req.url ?? '/', 'http://dsh.internal').pathname
-      const method = pathname.startsWith('/dropin/api/') ? pathname.slice(12) : undefined
+      const method = pathname.startsWith('/file-drop/api/') ? pathname.slice(14) : undefined
       if (!method || method.includes('/')) {
         writeJson(res, 404, { ok: false, error: { code: 'not-found', message: 'unknown API method' } })
         return
@@ -561,7 +561,7 @@ Report('{"kind":"exited"}')
         writeJson(res, 500, { ok: false, error: { code: 'internal', message: String((e as Error)?.message ?? e) } })
       }
     },
-  }), 'dsh-dropin: /dropin/api routes')
+  }), 'dsh-dropin: /file-drop/api routes')
 
   // 激活时预热拦截器
   const bootCwd = resolveCwd()

@@ -1,7 +1,7 @@
 {
-  "name": "@dsh-external/dsh-dropin",
+  "name": "dsh-file-drop",
   "version": "0.1.0",
-  "description": "拖放文件到 DSH：本地透明窗截获真实路径写入输入框（持久版）",
+  "description": "文件拖拽：把文件拖到 DSH 窗口，真实路径瞬间写入输入框（本地透明窗截获，零内容传输）",
   "keywords": [
     "dsh",
     "dsh-plugin",
