@@ -158,6 +158,12 @@ export function apply(ctx: AppContext): void {
 # 隐藏控制台 + 管道输出时 [Console]::Out 默认走 OEM 代码页（中文系统 = GBK），
 # 中文路径经 stdout 上报会被宿主按 UTF-8 解码成乱码——强制 UTF-8。
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch {}
+# 单实例自清理：host 重启时旧 helper 可能未被 terminate 干净，多个 helper 会
+# 竞争同一 cmd 文件、上报到已断开的旧管道（导致 pick 请求挂起）——启动即
+# 杀掉所有命令行含本脚本特征（DshDropWin32）的遗留 powershell。
+Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*DshDropWin32*' } |
+  ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {} }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $cmdDir = Join-Path (Get-Location) '.dsh-file-drop/.helper'

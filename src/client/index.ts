@@ -193,17 +193,27 @@ function DropBridge(props: BridgeProps): null {
 // ── 命令菜单"选择文件"源（输入框左下角 + / 命令菜单） ─────────────────
 /** 打开系统原生文件选择框（host 侧 WinForms OpenFileDialog），把路径写入输入框。 */
 async function pickAndPaste(sessionId: string): Promise<void> {
+  const diag: Record<string, unknown> = { sid: sessionId, stage: 'start' }
   try {
     const r = await api.pick()
+    diag.stage = 'picked'
+    diag.resp = r
     const paths: string[] = r && Array.isArray(r.paths) ? r.paths : []
+    diag.paths = paths
     if (!paths.length) return
     const input = inputFaceFor(sessionId)
+    diag.input = !!input
     if (!input) return
     const draft = input.state ? input.state.getSnapshot().draft : ''
+    diag.draft = draft
     const joined = paths.join('\n')
     input.setDraft(draft ? draft.replace(/[ \t]+\n?$/, '') + '\n' + joined : joined)
+    diag.stage = 'setDraft done'
   } catch (err) {
+    diag.err = String((err as Error)?.message ?? err)
     console.warn('[dsh-file-drop] pick failed:', err)
+  } finally {
+    ;(window as any).__dshFileDropDiag = diag
   }
 }
 
