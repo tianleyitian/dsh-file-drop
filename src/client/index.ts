@@ -18,9 +18,18 @@ type ClientContext = Context & {
     timeout(cb: () => void, ms: number): () => void
     interval(cb: () => void, ms: number): () => void
   }
+  sessions: {
+    list: {
+      getSnapshot(): { current?: string; byId?: Record<string, unknown> }
+    }
+    scope(id: string): unknown
+  }
 }
 
-export const inject = ['slots', 'timer']
+export const inject = ['slots', 'timer', 'sessions']
+
+// apply 时登记的上下文（组件内直接取服务，生态标准做法，见 dsh-better-sidebar）
+let clientCtx: ClientContext | null = null
 
 // ── host API（POST /file-drop/api/{method}，响应 { ok, value }） ──────────
 async function apiCall(method: string, payload?: unknown): Promise<any> {
@@ -48,6 +57,38 @@ const MAX_TOTAL_BYTES = 50 * 1024 * 1024
 const bridgeEntries = new Map<string, { actions: { setDraft(text: string): void }; draftRef: React.MutableRefObject<string> }>()
 // 最近挂载的桥接会话（标准 props 缺失时的回退来源）
 let lastBridgeSession: string | undefined
+
+// ── 会话与输入框的稳健解析 ────────────────────────────────────────────
+/** 当前会话：sessions 服务快照优先（生态标准），桥登记兜底。拖放时实时读取。 */
+function resolveCurrent(): string | undefined {
+  try {
+    const cur = clientCtx?.sessions.list.getSnapshot().current
+    if (cur) return cur
+  } catch { /* 服务不可用则走兜底 */ }
+  return lastBridgeSession
+}
+
+/** 会话输入框操作面：优先桥（标准 props），其次 conversation 服务直连。 */
+interface InputFace {
+  setDraft(text: string): void
+  state?: { getSnapshot(): { draft: string } }
+}
+function inputFaceFor(sessionId: string): InputFace | null {
+  const bridge = bridgeEntries.get(sessionId)
+  if (bridge && bridge.actions) {
+    return {
+      setDraft: (text) => bridge.actions.setDraft(text),
+      state: { getSnapshot: () => ({ draft: bridge.draftRef.current }) },
+    }
+  }
+  try {
+    const actx = clientCtx?.sessions.scope(sessionId)
+    if (!actx) return null
+    const conversation = clientCtx?.get('conversation') as { input?: { for(actx: unknown): InputFace } } | undefined
+    if (!conversation?.input) return null
+    return conversation.input.for(actx) ?? null
+  } catch { return null }
+}
 
 // ── 文件工具（与 dynamic 版一致） ──────────────────────────────────────
 async function fileToBase64(file: File): Promise<string> {
@@ -149,10 +190,7 @@ function DropBridge(props: BridgeProps): null {
 }
 
 // ── 全窗口拖放层 ──────────────────────────────────────────────────────
-interface OverlayProps {
-  useSessions?: (sel: (s: { current?: string }) => any) => any
-}
-function DropOverlay(props: OverlayProps): React.ReactElement {
+function DropOverlay(): React.ReactElement {
   const [active, setActive] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
   const [notice, setNotice] = React.useState<string | null>(null)
@@ -162,9 +200,8 @@ function DropOverlay(props: OverlayProps): React.ReactElement {
   const armingRef = React.useRef(false)
   const pollRef = React.useRef<(() => void) | null>(null)
   const pollBusyRef = React.useRef(false)
-  // 标准 props 缺失时回退到桥接会话（diagnostic 保留给排障）
-  const hookCurrent = props.useSessions ? props.useSessions((s) => s.current) : undefined
-  const current = hookCurrent || lastBridgeSession
+  // 会话一律在 arm/drop 时刻实时解析（sessions 快照 → 桥兜底），不缓存渲染期值
+  const currentRef = React.useRef<string | undefined>(undefined)
   const timer = (window as any).__dshFileDropTimer as ClientContext['timer'] | undefined
 
   const flash = (text: string): void => {
@@ -191,7 +228,7 @@ function DropOverlay(props: OverlayProps): React.ReactElement {
     api.disarm().catch(() => { /* ignore */ })
   }
 
-  const startPoll = (bridge: { actions: { setDraft(text: string): void }; draftRef: React.MutableRefObject<string> }): void => {
+  const startPoll = (sessionId: string): void => {
     stopPoll()
     const started = Date.now()
     pollRef.current = timer!.interval(async () => {
@@ -210,9 +247,14 @@ function DropOverlay(props: OverlayProps): React.ReactElement {
           depthRef.current = 0
           setActive(false)
           const paths: string[] = r.pending.map((p: unknown) => String(p))
-          const draft = bridge.draftRef.current || ''
+          const input = inputFaceFor(sessionId)
+          if (!input) {
+            flash('输入框尚未就绪，请重试拖拽')
+            return
+          }
+          const draft = input.state ? input.state.getSnapshot().draft : ''
           const joined = paths.join('\n')
-          bridge.actions.setDraft(draft ? draft.replace(/[ \t]+\n?$/, '') + '\n' + joined : joined)
+          input.setDraft(draft ? draft.replace(/[ \t]+\n?$/, '') + '\n' + joined : joined)
           flash('已写入 ' + paths.length + ' 个路径')
         } else if (r && r.cancelled) {
           disarm()
@@ -229,18 +271,16 @@ function DropOverlay(props: OverlayProps): React.ReactElement {
   }
 
   const armHelper = (): void => {
-    if (armedRef.current || armingRef.current || !current) return
+    if (armedRef.current || armingRef.current) return
+    const sid = resolveCurrent()
+    currentRef.current = sid
+    if (!sid) return
     armingRef.current = true
-    api.arm(current).then((r) => {
+    api.arm(sid).then((r) => {
       armingRef.current = false
       if (r && r.armed) {
-        const bridge = bridgeEntries.get(current!)
-        if (bridge && bridge.actions) {
-          armedRef.current = true
-          startPoll(bridge)
-        } else {
-          disarm()
-        }
+        armedRef.current = true
+        startPoll(sid)
       }
     }).catch(() => {
       armingRef.current = false
@@ -264,12 +304,14 @@ function DropOverlay(props: OverlayProps): React.ReactElement {
     if (!dt) return
     const items = collectTopItems(dt)
     if (!items.length) return
-    if (!current) {
-      flash('请先打开一个会话，再把文件拖进来 [cur=' + String(hookCurrent) + ' bridge=' + String(lastBridgeSession) + ' hook=' + (typeof props.useSessions) + ']')
+    const sid = resolveCurrent()
+    currentRef.current = sid
+    if (!sid) {
+      flash('请先打开一个会话，再把文件拖进来 [cur=' + String(resolveCurrent()) + ' bridge=' + String(lastBridgeSession) + ']')
       return
     }
-    const bridge = bridgeEntries.get(current)
-    if (!bridge || !bridge.actions) {
+    const input = inputFaceFor(sid)
+    if (!input) {
       flash('输入框尚未就绪，请稍后再试')
       return
     }
@@ -309,7 +351,7 @@ function DropOverlay(props: OverlayProps): React.ReactElement {
         isDir: p.isDir,
         data: await fileToBase64(p.file),
       })))
-      const res = await api.ingest(current, payload)
+      const res = await api.ingest(sid, payload)
       const written: Array<{ seq: number; path: string; rootPath: string }> = res && Array.isArray(res.written) ? res.written : []
       const skipped: Array<{ seq: number; relPath: string; reason: string }> = res && Array.isArray(res.skipped) ? res.skipped : []
       const bySeq = new Map<number, { seq: number; path: string; rootPath: string }>()
@@ -330,9 +372,9 @@ function DropOverlay(props: OverlayProps): React.ReactElement {
       }
       const skipCount = earlySkips.length + skipped.length
       if (pasted.length) {
-        const draft = bridge.draftRef.current || ''
+        const draft = input.state ? input.state.getSnapshot().draft : ''
         const joined = pasted.join('\n')
-        bridge.actions.setDraft(draft ? draft.replace(/[ \t]+\n?$/, '') + '\n' + joined : joined)
+        input.setDraft(draft ? draft.replace(/[ \t]+\n?$/, '') + '\n' + joined : joined)
         flash('已将 ' + written.length + ' 个文件写入' + (pasted.length > 1 ? ' ' + pasted.length + ' 个路径' : '输入框') + (skipCount ? '，跳过 ' + skipCount + ' 个' : ''))
       } else {
         const first = skipped[0] || earlySkips[0]
@@ -457,7 +499,8 @@ function DropOverlay(props: OverlayProps): React.ReactElement {
 }
 
 export function apply(ctx: ClientContext): void {
-  // 把 timer 暴露给组件（组件内无法直接取 inject 服务）
+  // 组件内直接取服务（生态标准做法）；timer 同时暴露给组件
+  clientCtx = ctx
   ;(window as any).__dshFileDropTimer = ctx.timer
 
   ctx.effect(() => ctx.slots.inject('shell.overlay', () =>

@@ -544,7 +544,8 @@ Report('{"kind":"exited"}')
         return
       }
       const pathname = new URL(req.url ?? '/', 'http://dsh.internal').pathname
-      const method = pathname.startsWith('/file-drop/api/') ? pathname.slice(14) : undefined
+      const PREFIX = '/file-drop/api/'
+      const method = pathname.startsWith(PREFIX) ? pathname.slice(PREFIX.length) : undefined
       if (!method || method.includes('/')) {
         writeJson(res, 404, { ok: false, error: { code: 'not-found', message: 'unknown API method' } })
         return
