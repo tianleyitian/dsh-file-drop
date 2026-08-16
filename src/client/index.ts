@@ -49,6 +49,7 @@ const api = {
   take: () => apiCall('take', {}),
   disarm: () => apiCall('disarm', {}),
   ingest: (sessionId: string, files: unknown[]) => apiCall('ingest', { sessionId, files }),
+  pick: () => apiCall('pick', {}),
 }
 
 const MAX_BYTES = 25 * 1024 * 1024
@@ -187,6 +188,57 @@ function DropBridge(props: BridgeProps): null {
     }
   }, [sessionId, inputActions])
   return null
+}
+
+// ── 命令菜单"选择文件"源（输入框左下角 + / 命令菜单） ─────────────────
+/** 打开系统原生文件选择框（host 侧 WinForms OpenFileDialog），把路径写入输入框。 */
+async function pickAndPaste(sessionId: string): Promise<void> {
+  try {
+    const r = await api.pick()
+    const paths: string[] = r && Array.isArray(r.paths) ? r.paths : []
+    if (!paths.length) return
+    const input = inputFaceFor(sessionId)
+    if (!input) return
+    const draft = input.state ? input.state.getSnapshot().draft : ''
+    const joined = paths.join('\n')
+    input.setDraft(draft ? draft.replace(/[ \t]+\n?$/, '') + '\n' + joined : joined)
+  } catch (err) {
+    console.warn('[dsh-file-drop] pick failed:', err)
+  }
+}
+
+/**
+ * 注册 '/' 触发词源：出现在输入框左下角命令菜单里（MenuView 按 source 分组渲染）。
+ * 服务可选（未装 ui-input-trigger 时拖放功能不受影响）；onPick 返回 'handled'
+ * 后异步打开文件对话框——官方为"source 自行处理（如打开自己的弹窗）"设计的路径。
+ */
+function registerFileSource(ctx: ClientContext): void {
+  const inputTriggers = ctx.get('inputTriggers') as {
+    registerSource(src: Record<string, unknown>): () => void
+  } | undefined
+  if (!inputTriggers) return
+  ctx.effect(() => inputTriggers.registerSource({
+    trigger: '/',
+    name: 'file',
+    order: 999,
+    candidates: async () => [{
+      name: '选择文件',
+      description: '打开系统文件选择框，把文件路径填入输入框',
+    }],
+    onPick: (pick: { session?: { sessionId?: string } } | undefined) => {
+      const sid = pick && pick.session ? pick.session.sessionId : undefined
+      if (sid) void pickAndPaste(sid)
+      return 'handled'
+    },
+  }), 'dsh-file-drop: command source')
+  // 分组标题本地化（未注册时显示原始名 file）
+  const locale = ctx.get('locale') as { register(ns: string, dict: { zh: Record<string, string>; en: Record<string, string> }): unknown } | undefined
+  if (locale) {
+    ctx.effect(() => locale.register('slash.menu', {
+      zh: { 'file': '文件' },
+      en: { 'file': 'Files' },
+    }) as () => void, 'dsh-file-drop: locale')
+  }
 }
 
 // ── 全窗口拖放层 ──────────────────────────────────────────────────────
@@ -502,6 +554,9 @@ export function apply(ctx: ClientContext): void {
   // 组件内直接取服务（生态标准做法）；timer 同时暴露给组件
   clientCtx = ctx
   ;(window as any).__dshFileDropTimer = ctx.timer
+
+  // 命令菜单"选择文件"（输入框左下角 +）
+  registerFileSource(ctx)
 
   ctx.effect(() => ctx.slots.inject('shell.overlay', () =>
     ctx.slots.register({ name: 'shell.overlay', id: 'file-drop-zone' }, DropOverlay),

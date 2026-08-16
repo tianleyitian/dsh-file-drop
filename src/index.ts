@@ -52,6 +52,7 @@ type AppContext = Context & {
   sessions: SessionsService
   webServer: WebServerService
   sandboxPolicy?: { workspaceRoot?: string }
+  timer: { timeout(cb: () => void, ms: number): () => void }
   setInterval(fn: () => void, ms: number): any
 }
 
@@ -106,6 +107,8 @@ export function apply(ctx: AppContext): void {
   } | null = null
   let pendingPaths: string[] | null = null
   let pendingCancelled = false
+  // 文件选择（命令菜单）：helper 弹出系统对话框后的路径回传
+  let pendingPickResolve: ((paths: string[]) => void) | null = null
   let helperActive = false
   let spawnPromise: Promise<unknown> | null = null
   let diagFile: string | null = null
@@ -270,6 +273,23 @@ $timer.Add_Tick({
         } elseif ($line -eq 'hide') {
           $form.Hide()
           Report('{"kind":"hidden"}')
+        } elseif ($line -eq 'open-picker') {
+          # 系统原生文件选择框（模态，跑在 UI 线程）；取消时上报空结果
+          try {
+            $dlg = New-Object System.Windows.Forms.OpenFileDialog
+            $dlg.Multiselect = $true
+            $dlg.Title = '选择文件（路径将填入输入框）'
+            $dlg.Filter = '所有文件 (*.*)|*.*'
+            $dlg.RestoreDirectory = $true
+            if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+              Report((@{ kind = 'picked'; paths = @($dlg.FileNames) } | ConvertTo-Json -Compress -Depth 6))
+            } else {
+              Report('{"kind":"pick-cancelled"}')
+            }
+          } catch {
+            LogH('PICK-ERR: ' + $_.Exception.Message)
+            Report('{"kind":"pick-cancelled"}')
+          }
         } elseif ($line -eq 'quit') {
           [System.Windows.Forms.Application]::Exit()
         }
@@ -329,6 +349,21 @@ Report('{"kind":"exited"}')
               void diag('helper hidden')
             } else if (msg && msg.kind === 'ready') {
               void diag('helper ready')
+            } else if (msg && msg.kind === 'picked' && Array.isArray(msg.paths)) {
+              const paths = msg.paths.map((p) => String(p))
+              void diag('helper picked: ' + paths.length + ' paths')
+              if (pendingPickResolve) {
+                const r = pendingPickResolve
+                pendingPickResolve = null
+                r(paths)
+              }
+            } else if (msg && msg.kind === 'pick-cancelled') {
+              void diag('helper pick cancelled')
+              if (pendingPickResolve) {
+                const r = pendingPickResolve
+                pendingPickResolve = null
+                r([])
+              }
             }
           } catch { /* 非 JSON 行忽略 */ }
         }
@@ -411,6 +446,34 @@ Report('{"kind":"exited"}')
         try { await sendCmd(helper, 'hide'); void diag('disarm: hide sent') } catch { /* ignore */ }
       }
       return {}
+    },
+    pick: async () => {
+      // 命令菜单"选择文件"：helper 弹系统原生对话框，返回所选路径（取消返回空数组）
+      const state = (helper && !helper.dead) ? helper : null
+      if (!state) {
+        const cwd = resolveCwd()
+        if (cwd) {
+          void diag('pick: helper missing, background respawn')
+          spawnHelper(cwd).catch((e) => void diag('pick respawn failed: ' + String((e as Error)?.message ?? e)))
+        }
+        return { paths: [], error: '文件选择器未就绪，请稍后再试' }
+      }
+      if (pendingPickResolve) return { paths: [], error: '已有选择进行中' }
+      const result = new Promise<string[]>((resolve) => { pendingPickResolve = resolve })
+      try {
+        await sendCmd(state, 'open-picker')
+      } catch (e) {
+        pendingPickResolve = null
+        return { paths: [], error: String((e as Error)?.message ?? e) }
+      }
+      // 用户长时间不选择/对话框异常时兜底（120s），避免请求悬挂
+      const timeout = new Promise<string[]>((resolve) => {
+        ctx.timer.timeout(() => {
+          if (pendingPickResolve) { pendingPickResolve = null; resolve([]) }
+        }, 120000)
+      })
+      const paths = await Promise.race([result, timeout])
+      return { paths }
     },
     ingest: async (payload: { sessionId?: string; files?: Array<{ seq?: number; name?: string; relPath?: string; top?: string; data?: string }> }) => {
       const files = Array.isArray(payload?.files) ? payload.files : []
