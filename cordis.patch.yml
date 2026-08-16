@@ -1,0 +1,4 @@
+# dsh-dropin bundle patch: mounts the persistent drop-to-input plugin.
+- insert:
+    - id: dropin
+      name: '@dsh-external/dsh-dropin'
