@@ -179,12 +179,14 @@ Add-Type -AssemblyName System.Drawing
 $cmdDir = Join-Path (Get-Location) '.dsh-file-drop/.helper'
 [System.IO.Directory]::CreateDirectory($cmdDir) | Out-Null
 $dll = Join-Path $cmdDir 'DshDropWin32.dll'
-# DLL 缓存：已含全部所需类型则直接加载；旧版本缺失 DshFolderPicker 时重新编译。
+# DLL 缓存：已含所需类型则直接加载；缺失/旧版时重新编译。
+# 注意：C# 源码保持纯 ASCII（PS 5.1 Add-Type 按 ANSI 读无 BOM 源文件，
+# 中文/反斜杠字面量都会在模板字符串转义或编码环节破裂）。
 $typesOk = $false
 if (Test-Path $dll) {
   try {
     Add-Type -Path $dll
-    $typesOk = ('DshFolderPicker' -as [type]) -ne $null -and ('DshDropWin32' -as [type]) -ne $null
+    $typesOk = ('DshDropWin32' -as [type]) -ne $null
   } catch { $typesOk = $false }
 }
 if (-not $typesOk) {
@@ -195,58 +197,6 @@ public static class DshDropWin32 {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
-}
-[ComImport, Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
-public class FileOpenDialogRCW { }
-[ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IFileOpenDialog {
-  [PreserveSig] int Show(IntPtr hwndOwner);
-  [PreserveSig] int SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);
-  [PreserveSig] int SetFileTypeIndex(uint iFileType);
-  [PreserveSig] int GetFileTypeIndex(out uint piFileType);
-  [PreserveSig] int Advise(IntPtr pfde, out uint pdwCookie);
-  [PreserveSig] int Unadvise(uint dwCookie);
-  [PreserveSig] int SetOptions(uint fos);
-  [PreserveSig] int GetOptions(out uint pfos);
-  [PreserveSig] int SetDefaultFolder(IShellItem psi);
-  [PreserveSig] int SetFolder(IShellItem psi);
-  [PreserveSig] int GetFolder(out IShellItem ppsi);
-  [PreserveSig] int GetCurrentSelection(out IShellItem ppsi);
-  [PreserveSig] int SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
-  [PreserveSig] int GetFileName(out IntPtr pszName);
-  [PreserveSig] int SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
-  [PreserveSig] int SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
-  [PreserveSig] int SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
-  [PreserveSig] int GetResult(out IShellItem ppsi);
-}
-[ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IShellItem {
-  [PreserveSig] int BindToHandler(IntPtr pbc, [MarshalAs(UnmanagedType.LPStruct)] Guid bhid, [MarshalAs(UnmanagedType.LPStruct)] Guid riid, out IntPtr ppv);
-  [PreserveSig] int GetParent(out IShellItem ppsi);
-  [PreserveSig] int GetDisplayName(uint sigdnName, out IntPtr ppszName);
-  [PreserveSig] int GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
-  [PreserveSig] int Compare(IShellItem psi, uint hint, out int piOrder);
-}
-/// Windows 10+ 现代文件夹选择对话框（IFileDialog + FOS_PICKFOLDERS）。
-public static class DshFolderPicker {
-  public static string Pick(IntPtr owner) {
-    try {
-      IFileOpenDialog dialog = (IFileOpenDialog)(new FileOpenDialogRCW());
-      uint opts;
-      if (dialog.GetOptions(out opts) == 0) {
-        dialog.SetOptions(opts | 0x00000020u); // FOS_PICKFOLDERS
-      }
-      dialog.SetTitle("选择文件夹（路径将填入输入框）");
-      if (dialog.Show(owner) != 0) return null;
-      IShellItem item;
-      if (dialog.GetResult(out item) != 0 || item == null) return null;
-      IntPtr psz;
-      if (item.GetDisplayName(0x80018000u, out psz) != 0 || psz == IntPtr.Zero) return null;
-      string path = Marshal.PtrToStringUni(psz);
-      if (path != null && path.StartsWith("\\\\?\\", StringComparison.Ordinal)) path = path.Substring(4);
-      return path;
-    } catch { return null; }
-  }
 }
 '@ -OutputAssembly $dll -OutputType Library
   Add-Type -Path $dll
