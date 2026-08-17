@@ -312,10 +312,7 @@ $timer.Add_Tick({
             try { $script:pickDlg.Close() } catch { LogH('CLOSE-PICKER-ERR: ' + $_.Exception.Message) }
           }
         } elseif ($line -eq 'open-picker') {
-          # 系统原生选择框（模态，跑在 UI 线程）；取消时上报空结果。
-          # 文件/文件夹二合一：OpenFileDialog hack（ValidateNames=false）——
-          #   点选文件 + 打开 → 文件路径
-          #   进入文件夹 + 打开 → 文件夹路径（FileName 非有效文件 → 返回当前目录）
+          # 系统原生文件选择框（模态，多选，跑在 UI 线程）；取消时上报空结果。
           # 对话框打开期间 Timer 仍会 tick（嵌套消息循环）——用 pickOpen 标志
           # 挡住重复/嵌套的 open-picker，避免连点出多个对话框互相打架。
           if ($script:pickOpen) {
@@ -325,14 +322,10 @@ $timer.Add_Tick({
             try {
               LogH('PICK: 打开对话框')
               $dlg = New-Object System.Windows.Forms.OpenFileDialog
-              $dlg.Multiselect = $false
-              $dlg.Title = '选择文件或文件夹（路径将填入输入框）'
+              $dlg.Multiselect = $true
+              $dlg.Title = '选择文件（路径将填入输入框）'
               $dlg.Filter = '所有文件 (*.*)|*.*'
               $dlg.RestoreDirectory = $true
-              $dlg.ValidateNames = $false
-              $dlg.CheckFileExists = $false
-              $dlg.CheckPathExists = $true
-              $dlg.FileName = '选择文件或文件夹'
               # 关键：ShowDialog 无 owner 时对话框可能弹出在屏幕外/被遮挡（用户看不到，
               # ShowDialog 永久阻塞）。先显示透明窗（跟随鼠标、topmost）作为 owner，
               # 对话框会出现在鼠标附近且层级在最前。
@@ -348,29 +341,9 @@ $timer.Add_Tick({
               $result = $dlg.ShowDialog($form)
               LogH('PICK: ShowDialog 结果=' + $result)
               if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-                $raw = [string]$dlg.FileName
-                $raw = $raw.Trim()
-                LogH('PICK: FileName=' + $raw)
-                $picked = @()
-                if ($raw) {
-                  $clean = $raw.TrimEnd([char[]]@('/', '\\'))
-                  if ([System.IO.Directory]::Exists($clean)) {
-                    $picked = @($clean)          # 文件夹（进入后打开）
-                  } elseif ([System.IO.File]::Exists($clean)) {
-                    $picked = @($clean)          # 文件（点选后打开）
-                  } else {
-                    # hack 占位文本残留 → 取其目录（当前目录 = 用户停留的文件夹）
-                    $dir = [System.IO.Path]::GetDirectoryName($clean)
-                    if ($dir) { $picked = @($dir) }
-                  }
-                }
-                if ($picked.Count -gt 0) {
-                  LogH('PICK: 选中 1 项')
-                  Report((@{ kind = 'picked'; paths = $picked } | ConvertTo-Json -Compress -Depth 6))
-                } else {
-                  LogH('PICK: 无法解析路径，按取消处理')
-                  Report('{"kind":"pick-cancelled"}')
-                }
+                $names = @($dlg.FileNames)
+                LogH('PICK: 选中 ' + $names.Count + ' 个文件')
+                Report((@{ kind = 'picked'; paths = $names } | ConvertTo-Json -Compress -Depth 6))
               } else {
                 LogH('PICK: 用户取消')
                 Report('{"kind":"pick-cancelled"}')
