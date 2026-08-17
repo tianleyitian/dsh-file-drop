@@ -179,9 +179,15 @@ Add-Type -AssemblyName System.Drawing
 $cmdDir = Join-Path (Get-Location) '.dsh-file-drop/.helper'
 [System.IO.Directory]::CreateDirectory($cmdDir) | Out-Null
 $dll = Join-Path $cmdDir 'DshDropWin32.dll'
+# DLL 缓存：已含全部所需类型则直接加载；旧版本缺失 DshFolderPicker 时重新编译。
+$typesOk = $false
 if (Test-Path $dll) {
-  Add-Type -Path $dll
-} else {
+  try {
+    Add-Type -Path $dll
+    $typesOk = ('DshFolderPicker' -as [type]) -ne $null -and ('DshDropWin32' -as [type]) -ne $null
+  } catch { $typesOk = $false }
+}
+if (-not $typesOk) {
   Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -189,6 +195,58 @@ public static class DshDropWin32 {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+}
+[ComImport, Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
+public class FileOpenDialogRCW { }
+[ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IFileOpenDialog {
+  [PreserveSig] int Show(IntPtr hwndOwner);
+  [PreserveSig] int SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);
+  [PreserveSig] int SetFileTypeIndex(uint iFileType);
+  [PreserveSig] int GetFileTypeIndex(out uint piFileType);
+  [PreserveSig] int Advise(IntPtr pfde, out uint pdwCookie);
+  [PreserveSig] int Unadvise(uint dwCookie);
+  [PreserveSig] int SetOptions(uint fos);
+  [PreserveSig] int GetOptions(out uint pfos);
+  [PreserveSig] int SetDefaultFolder(IShellItem psi);
+  [PreserveSig] int SetFolder(IShellItem psi);
+  [PreserveSig] int GetFolder(out IShellItem ppsi);
+  [PreserveSig] int GetCurrentSelection(out IShellItem ppsi);
+  [PreserveSig] int SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+  [PreserveSig] int GetFileName(out IntPtr pszName);
+  [PreserveSig] int SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+  [PreserveSig] int SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
+  [PreserveSig] int SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+  [PreserveSig] int GetResult(out IShellItem ppsi);
+}
+[ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IShellItem {
+  [PreserveSig] int BindToHandler(IntPtr pbc, [MarshalAs(UnmanagedType.LPStruct)] Guid bhid, [MarshalAs(UnmanagedType.LPStruct)] Guid riid, out IntPtr ppv);
+  [PreserveSig] int GetParent(out IShellItem ppsi);
+  [PreserveSig] int GetDisplayName(uint sigdnName, out IntPtr ppszName);
+  [PreserveSig] int GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+  [PreserveSig] int Compare(IShellItem psi, uint hint, out int piOrder);
+}
+/// Windows 10+ 现代文件夹选择对话框（IFileDialog + FOS_PICKFOLDERS）。
+public static class DshFolderPicker {
+  public static string Pick(IntPtr owner) {
+    try {
+      IFileOpenDialog dialog = (IFileOpenDialog)(new FileOpenDialogRCW());
+      uint opts;
+      if (dialog.GetOptions(out opts) == 0) {
+        dialog.SetOptions(opts | 0x00000020u); // FOS_PICKFOLDERS
+      }
+      dialog.SetTitle("选择文件夹（路径将填入输入框）");
+      if (dialog.Show(owner) != 0) return null;
+      IShellItem item;
+      if (dialog.GetResult(out item) != 0 || item == null) return null;
+      IntPtr psz;
+      if (item.GetDisplayName(0x80018000u, out psz) != 0 || psz == IntPtr.Zero) return null;
+      string path = Marshal.PtrToStringUni(psz);
+      if (path != null && path.StartsWith("\\\\?\\", StringComparison.Ordinal)) path = path.Substring(4);
+      return path;
+    } catch { return null; }
+  }
 }
 '@ -OutputAssembly $dll -OutputType Library
   Add-Type -Path $dll
@@ -349,6 +407,35 @@ $timer.Add_Tick({
               try { $form.Hide() } catch {}
             }
           }
+        } elseif ($line -eq 'open-folder-picker') {
+          # 现代文件夹选择对话框（IFileDialog FOS_PICKFOLDERS，与资源管理器同款 UI）
+          if ($script:pickOpen) {
+            LogH('PICK-BUSY: 已有对话框打开，忽略重复命令')
+          } else {
+            $script:pickOpen = $true
+            try {
+              LogH('FOLDERPICK: 打开文件夹选择器')
+              $p = [System.Windows.Forms.Cursor]::Position
+              $form.Location = New-Object System.Drawing.Point(($p.X - 100), ($p.Y - 100))
+              $form.Show()
+              if (-not $form.IsHandleCreated) { [void]$form.CreateControl() }
+              [DshDropWin32]::ShowWindow($form.Handle, 8) | Out-Null
+              [DshDropWin32]::SetWindowPos($form.Handle, [IntPtr]::new(-1), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0010) | Out-Null
+              $folder = [DshFolderPicker]::Pick($form.Handle)
+              LogH('FOLDERPICK: 结果=' + ($(if ($folder) { '选中' } else { '取消' })))
+              if ($folder) {
+                Report((@{ kind = 'picked'; paths = @($folder) } | ConvertTo-Json -Compress -Depth 6))
+              } else {
+                Report('{"kind":"pick-cancelled"}')
+              }
+            } catch {
+              LogH('FOLDERPICK-ERR: ' + $_.Exception.Message)
+              Report('{"kind":"pick-cancelled"}')
+            } finally {
+              $script:pickOpen = $false
+              try { $form.Hide() } catch {}
+            }
+          }
         } elseif ($line -eq 'quit') {
           [System.Windows.Forms.Application]::Exit()
         }
@@ -453,11 +540,12 @@ Report('{"kind":"exited"}')
     await fsWrite(p, prev + text + '\n')
   }
 
-  // 打开系统原生文件选择框并等待结果（取消返回空数组）。供 API pick 与
-  // host 命令 pick-file 共用；同一时刻只允许一个选择进行中。
+  // 打开系统原生选择框并等待结果（取消返回空数组）。供 API pick 与
+  // host 命令 pick-file/pick-folder 共用；同一时刻只允许一个选择进行中。
+  // cmd：'open-picker'（文件）/ 'open-folder-picker'（文件夹）。
   // signal：命令执行中止（会话关闭/UI 取消）时主动 close-picker 关闭对话框，
   // 避免对话框与请求生命周期脱节（对话框悬挂 → helper 卡死 → 无法再 pick）。
-  const openPicker = async (signal?: AbortSignal): Promise<string[]> => {
+  const openPicker = async (signal?: AbortSignal, cmd = 'open-picker'): Promise<string[]> => {
     const state = (helper && !helper.dead) ? helper : null
     if (!state) {
       const cwd = resolveCwd()
@@ -471,6 +559,8 @@ Report('{"kind":"exited"}')
     const result = new Promise<string[]>((resolve) => { pendingPickResolve = resolve })
     // 请求中止：让 helper 在嵌套 tick 里关闭模态对话框（ShowDialog 随即返回并
     // 上报 pick-cancelled），pendingPickResolve 被消费，不残留悬挂状态。
+    // （文件夹对话框为 COM 对话框，无 Close API——中止时仅解除 host 等待，
+    // 对话框由用户自行关闭，关闭后的上报会被忽略，无害。）
     const onAbort = (): void => {
       try { void sendCmd(state, 'close-picker') } catch { /* ignore */ }
     }
@@ -479,7 +569,7 @@ Report('{"kind":"exited"}')
       else signal.addEventListener('abort', onAbort, { once: true })
     }
     try {
-      await sendCmd(state, 'open-picker')
+      await sendCmd(state, cmd)
     } catch (e) {
       pendingPickResolve = null
       void diag('pick sendCmd failed: ' + String((e as Error)?.message ?? e))
@@ -502,17 +592,23 @@ Report('{"kind":"exited"}')
   // host 命令 pick-file：加号菜单点击即执行（无参数 bare 命令 → runDetached
   // 直接执行，不经过 popupSelect 选项壳）。路径暂存 pendingPickPaths，
   // client 经 take 取回写入输入框。
-  ctx.effect(() => ctx.commands.register({
-    name: 'pick-file',
-    description: '打开系统文件选择框，把文件路径填入输入框',
-    handler: async (inv): Promise<{ kind: 'success' | 'error'; text: string }> => {
-      const paths = await openPicker(inv.signal)
-      pendingPickPaths = paths.length ? paths : null
-      void diag('command pick-file: ' + (paths.length ? paths.length + ' paths' : 'cancelled'))
-      if (!paths.length) return { kind: 'success', text: '未选择文件' }
-      return { kind: 'success', text: '已选择 ' + paths.length + ' 个文件' }
-    },
-  }), 'dsh-file-drop: pick-file command')
+  const registerPickCommand = (name: string, description: string, cmd: string): (() => void) => {
+    return ctx.commands.register({
+      name,
+      description,
+      handler: async (inv): Promise<{ kind: 'success' | 'error'; text: string }> => {
+        const paths = await openPicker(inv.signal, cmd)
+        pendingPickPaths = paths.length ? paths : null
+        void diag('command ' + name + ': ' + (paths.length ? paths.length + ' paths' : 'cancelled'))
+        if (!paths.length) return { kind: 'success', text: '未选择' }
+        return { kind: 'success', text: '已选择 ' + paths.length + ' 个' }
+      },
+    })
+  }
+  ctx.effect(() => registerPickCommand('pick-file', '打开系统文件选择框，把文件路径填入输入框', 'open-picker'),
+    'dsh-file-drop: pick-file command')
+  ctx.effect(() => registerPickCommand('pick-folder', '打开系统文件夹选择框，把文件夹路径填入输入框', 'open-folder-picker'),
+    'dsh-file-drop: pick-folder command')
 
   ctx.effect(() => () => {
     if (helper && helper.handle) {
