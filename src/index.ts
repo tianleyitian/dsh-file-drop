@@ -353,7 +353,7 @@ $timer.Add_Tick({
                 LogH('PICK: FileName=' + $raw)
                 $picked = @()
                 if ($raw) {
-                  $clean = $raw.TrimEnd([char[]]@('/', '\'))
+                  $clean = $raw.TrimEnd([char[]]@('/', '\\'))
                   if ([System.IO.Directory]::Exists($clean)) {
                     $picked = @($clean)          # 文件夹（进入后打开）
                   } elseif ([System.IO.File]::Exists($clean)) {
