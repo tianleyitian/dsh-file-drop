@@ -170,9 +170,9 @@ export function apply(ctx: AppContext): void {
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch {}
 # 单实例自清理：host 重启时旧 helper 可能未被 terminate 干净，多个 helper 会
 # 竞争同一 cmd 文件、上报到已断开的旧管道（导致 pick 请求挂起）——启动即
-# 杀掉所有命令行含本脚本特征（DshDropWin32）的遗留 powershell。
+# 杀掉所有命令行含本脚本特征（-EncodedCommand + -STA）的遗留 powershell。
 Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*DshDropWin32*' } |
+  Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*-EncodedCommand*' -and $_.CommandLine -like '*-STA*' } |
   ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {} }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -353,7 +353,7 @@ $timer.Add_Tick({
                 LogH('PICK: FileName=' + $raw)
                 $picked = @()
                 if ($raw) {
-                  $clean = $raw.TrimEnd('/', '\')
+                  $clean = $raw.TrimEnd([char[]]@('/', '\'))
                   if ([System.IO.Directory]::Exists($clean)) {
                     $picked = @($clean)          # 文件夹（进入后打开）
                   } elseif ([System.IO.File]::Exists($clean)) {
@@ -408,7 +408,9 @@ Report('{"kind":"exited"}')
       if (!ps) ps = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
       await diag('spawn helper start')
       const handle = ctx.subprocess.spawn({
-        argv: [ps, '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', HELPER_SCRIPT],
+        // -EncodedCommand（UTF-16LE Base64）：PS 5.1 按 ANSI 读取 -Command 脚本
+        // 源码，中文字面量（对话框标题/日志）会变乱码——编码命令完全规避。
+        argv: [ps, '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-STA', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(HELPER_SCRIPT, 'utf16le').toString('base64')],
         cwd: String(cwd),
         stdio: { stdin: 'ignore', stdout: 'pipe', stderr: { maxBytes: 8192 } },
         graceMs: 5000,
