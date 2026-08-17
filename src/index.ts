@@ -362,7 +362,10 @@ $timer.Add_Tick({
             try { $script:pickDlg.Close() } catch { LogH('CLOSE-PICKER-ERR: ' + $_.Exception.Message) }
           }
         } elseif ($line -eq 'open-picker') {
-          # 系统原生文件选择框（模态，跑在 UI 线程）；取消时上报空结果。
+          # 系统原生选择框（模态，跑在 UI 线程）；取消时上报空结果。
+          # 文件/文件夹二合一：OpenFileDialog hack（ValidateNames=false）——
+          #   点选文件 + 打开 → 文件路径
+          #   进入文件夹 + 打开 → 文件夹路径（FileName 非有效文件 → 返回当前目录）
           # 对话框打开期间 Timer 仍会 tick（嵌套消息循环）——用 pickOpen 标志
           # 挡住重复/嵌套的 open-picker，避免连点出多个对话框互相打架。
           if ($script:pickOpen) {
@@ -372,10 +375,14 @@ $timer.Add_Tick({
             try {
               LogH('PICK: 打开对话框')
               $dlg = New-Object System.Windows.Forms.OpenFileDialog
-              $dlg.Multiselect = $true
-              $dlg.Title = '选择文件（路径将填入输入框）'
+              $dlg.Multiselect = $false
+              $dlg.Title = '选择文件或文件夹（路径将填入输入框）'
               $dlg.Filter = '所有文件 (*.*)|*.*'
               $dlg.RestoreDirectory = $true
+              $dlg.ValidateNames = $false
+              $dlg.CheckFileExists = $false
+              $dlg.CheckPathExists = $true
+              $dlg.FileName = '选择文件或文件夹'
               # 关键：ShowDialog 无 owner 时对话框可能弹出在屏幕外/被遮挡（用户看不到，
               # ShowDialog 永久阻塞）。先显示透明窗（跟随鼠标、topmost）作为 owner，
               # 对话框会出现在鼠标附近且层级在最前。
@@ -391,9 +398,29 @@ $timer.Add_Tick({
               $result = $dlg.ShowDialog($form)
               LogH('PICK: ShowDialog 结果=' + $result)
               if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-                $names = @($dlg.FileNames)
-                LogH('PICK: 选中 ' + $names.Count + ' 个文件')
-                Report((@{ kind = 'picked'; paths = $names } | ConvertTo-Json -Compress -Depth 6))
+                $raw = [string]$dlg.FileName
+                $raw = $raw.Trim()
+                LogH('PICK: FileName=' + $raw)
+                $picked = @()
+                if ($raw) {
+                  $clean = $raw.TrimEnd('/', '\')
+                  if ([System.IO.Directory]::Exists($clean)) {
+                    $picked = @($clean)          # 文件夹（进入后打开）
+                  } elseif ([System.IO.File]::Exists($clean)) {
+                    $picked = @($clean)          # 文件（点选后打开）
+                  } else {
+                    # hack 占位文本残留 → 取其目录（当前目录 = 用户停留的文件夹）
+                    $dir = [System.IO.Path]::GetDirectoryName($clean)
+                    if ($dir) { $picked = @($dir) }
+                  }
+                }
+                if ($picked.Count -gt 0) {
+                  LogH('PICK: 选中 1 项')
+                  Report((@{ kind = 'picked'; paths = $picked } | ConvertTo-Json -Compress -Depth 6))
+                } else {
+                  LogH('PICK: 无法解析路径，按取消处理')
+                  Report('{"kind":"pick-cancelled"}')
+                }
               } else {
                 LogH('PICK: 用户取消')
                 Report('{"kind":"pick-cancelled"}')
@@ -404,35 +431,6 @@ $timer.Add_Tick({
             } finally {
               $script:pickOpen = $false
               $script:pickDlg = $null
-              try { $form.Hide() } catch {}
-            }
-          }
-        } elseif ($line -eq 'open-folder-picker') {
-          # 现代文件夹选择对话框（IFileDialog FOS_PICKFOLDERS，与资源管理器同款 UI）
-          if ($script:pickOpen) {
-            LogH('PICK-BUSY: 已有对话框打开，忽略重复命令')
-          } else {
-            $script:pickOpen = $true
-            try {
-              LogH('FOLDERPICK: 打开文件夹选择器')
-              $p = [System.Windows.Forms.Cursor]::Position
-              $form.Location = New-Object System.Drawing.Point(($p.X - 100), ($p.Y - 100))
-              $form.Show()
-              if (-not $form.IsHandleCreated) { [void]$form.CreateControl() }
-              [DshDropWin32]::ShowWindow($form.Handle, 8) | Out-Null
-              [DshDropWin32]::SetWindowPos($form.Handle, [IntPtr]::new(-1), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0010) | Out-Null
-              $folder = [DshFolderPicker]::Pick($form.Handle)
-              LogH('FOLDERPICK: 结果=' + ($(if ($folder) { '选中' } else { '取消' })))
-              if ($folder) {
-                Report((@{ kind = 'picked'; paths = @($folder) } | ConvertTo-Json -Compress -Depth 6))
-              } else {
-                Report('{"kind":"pick-cancelled"}')
-              }
-            } catch {
-              LogH('FOLDERPICK-ERR: ' + $_.Exception.Message)
-              Report('{"kind":"pick-cancelled"}')
-            } finally {
-              $script:pickOpen = $false
               try { $form.Hide() } catch {}
             }
           }
@@ -541,11 +539,10 @@ Report('{"kind":"exited"}')
   }
 
   // 打开系统原生选择框并等待结果（取消返回空数组）。供 API pick 与
-  // host 命令 pick-file/pick-folder 共用；同一时刻只允许一个选择进行中。
-  // cmd：'open-picker'（文件）/ 'open-folder-picker'（文件夹）。
+  // host 命令 pick-file 共用；同一时刻只允许一个选择进行中。
   // signal：命令执行中止（会话关闭/UI 取消）时主动 close-picker 关闭对话框，
   // 避免对话框与请求生命周期脱节（对话框悬挂 → helper 卡死 → 无法再 pick）。
-  const openPicker = async (signal?: AbortSignal, cmd = 'open-picker'): Promise<string[]> => {
+  const openPicker = async (signal?: AbortSignal): Promise<string[]> => {
     const state = (helper && !helper.dead) ? helper : null
     if (!state) {
       const cwd = resolveCwd()
@@ -559,8 +556,6 @@ Report('{"kind":"exited"}')
     const result = new Promise<string[]>((resolve) => { pendingPickResolve = resolve })
     // 请求中止：让 helper 在嵌套 tick 里关闭模态对话框（ShowDialog 随即返回并
     // 上报 pick-cancelled），pendingPickResolve 被消费，不残留悬挂状态。
-    // （文件夹对话框为 COM 对话框，无 Close API——中止时仅解除 host 等待，
-    // 对话框由用户自行关闭，关闭后的上报会被忽略，无害。）
     const onAbort = (): void => {
       try { void sendCmd(state, 'close-picker') } catch { /* ignore */ }
     }
@@ -569,7 +564,7 @@ Report('{"kind":"exited"}')
       else signal.addEventListener('abort', onAbort, { once: true })
     }
     try {
-      await sendCmd(state, cmd)
+      await sendCmd(state, 'open-picker')
     } catch (e) {
       pendingPickResolve = null
       void diag('pick sendCmd failed: ' + String((e as Error)?.message ?? e))
@@ -591,24 +586,19 @@ Report('{"kind":"exited"}')
 
   // host 命令 pick-file：加号菜单点击即执行（无参数 bare 命令 → runDetached
   // 直接执行，不经过 popupSelect 选项壳）。路径暂存 pendingPickPaths，
-  // client 经 take 取回写入输入框。
-  const registerPickCommand = (name: string, description: string, cmd: string): (() => void) => {
-    return ctx.commands.register({
-      name,
-      description,
-      handler: async (inv): Promise<{ kind: 'success' | 'error'; text: string }> => {
-        const paths = await openPicker(inv.signal, cmd)
-        pendingPickPaths = paths.length ? paths : null
-        void diag('command ' + name + ': ' + (paths.length ? paths.length + ' paths' : 'cancelled'))
-        if (!paths.length) return { kind: 'success', text: '未选择' }
-        return { kind: 'success', text: '已选择 ' + paths.length + ' 个' }
-      },
-    })
-  }
-  ctx.effect(() => registerPickCommand('pick-file', '打开系统文件选择框，把文件路径填入输入框', 'open-picker'),
-    'dsh-file-drop: pick-file command')
-  ctx.effect(() => registerPickCommand('pick-folder', '打开系统文件夹选择框，把文件夹路径填入输入框', 'open-folder-picker'),
-    'dsh-file-drop: pick-folder command')
+  // client 经 take 取回写入输入框。对话框同时支持文件与文件夹：
+  // 选中文件点"打开"→ 文件路径；进入文件夹点"打开"→ 文件夹路径。
+  ctx.effect(() => ctx.commands.register({
+    name: 'pick-file',
+    description: '打开系统选择框，把文件或文件夹路径填入输入框',
+    handler: async (inv): Promise<{ kind: 'success' | 'error'; text: string }> => {
+      const paths = await openPicker(inv.signal)
+      pendingPickPaths = paths.length ? paths : null
+      void diag('command pick-file: ' + (paths.length ? paths.length + ' paths' : 'cancelled'))
+      if (!paths.length) return { kind: 'success', text: '未选择' }
+      return { kind: 'success', text: '已选择 ' + paths.length + ' 个' }
+    },
+  }), 'dsh-file-drop: pick-file command')
 
   ctx.effect(() => () => {
     if (helper && helper.handle) {

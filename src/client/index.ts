@@ -256,7 +256,7 @@ function registerPickFileSync(ctx: ClientContext): void {
   const scan = (session: NonNullable<typeof watched>): void => {
     const nodes = session.getSnapshot().nodes ?? []
     for (const n of nodes) {
-      if (n.kind !== 'command' || (n.name !== 'pick-file' && n.name !== 'pick-folder') || !n.outcome || n.outcome.kind !== 'success') continue
+      if (n.kind !== 'command' || n.name !== 'pick-file' || !n.outcome || n.outcome.kind !== 'success') continue
       const id = n.commandId
       if (!id || handled.has(id)) continue
       handled.add(id)
